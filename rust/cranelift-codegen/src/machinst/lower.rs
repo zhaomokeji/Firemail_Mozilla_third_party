@@ -8,8 +8,9 @@ use crate::inst_predicates::{has_side_effect_or_load, is_constant_64bit};
 use crate::ir::instructions::BranchInfo;
 use crate::ir::types::I64;
 use crate::ir::{
-    ArgumentPurpose, Block, Constant, ConstantData, ExternalName, Function, GlobalValueData, Inst,
-    InstructionData, MemFlags, Opcode, Signature, SourceLoc, Type, Value, ValueDef,
+    ArgumentExtension, ArgumentPurpose, Block, Constant, ConstantData, ExternalName, Function,
+    GlobalValueData, Inst, InstructionData, MemFlags, Opcode, Signature, SourceLoc, Type, Value,
+    ValueDef,
 };
 use crate::machinst::{
     ABIBody, BlockIndex, BlockLoweringOrder, LoweredBlock, MachLabel, VCode, VCodeBuilder,
@@ -231,7 +232,7 @@ pub struct Lower<'func, I: VCodeInst> {
     value_regs: SecondaryMap<Value, Reg>,
 
     /// Return-value vregs.
-    retval_regs: Vec<Reg>,
+    retval_regs: Vec<(Reg, ArgumentExtension)>,
 
     /// Instruction colors.
     inst_colors: SecondaryMap<Inst, InstColor>,
@@ -353,7 +354,7 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
             next_vreg += 1;
             let regclass = I::rc_for_type(ret.value_type)?;
             let vreg = Reg::new_virtual(regclass, v);
-            retval_regs.push(vreg);
+            retval_regs.push((vreg, ret.extension));
             vcode.set_vreg_type(vreg.as_virtual_reg().unwrap(), ret.value_type);
         }
 
@@ -426,9 +427,9 @@ impl<'func, I: VCodeInst> Lower<'func, I> {
 
     fn gen_retval_setup(&mut self, gen_ret_inst: GenerateReturn) {
         let retval_regs = self.retval_regs.clone();
-        for (i, reg) in retval_regs.into_iter().enumerate() {
+        for (i, (reg, ext)) in retval_regs.into_iter().enumerate() {
             let reg = Writable::from_reg(reg);
-            let insns = self.vcode.abi().gen_copy_reg_to_retval(i, reg);
+            let insns = self.vcode.abi().gen_copy_reg_to_retval(i, reg, ext);
             for insn in insns {
                 self.emit(insn);
             }
@@ -843,7 +844,7 @@ impl<'func, I: VCodeInst> LowerCtx for Lower<'func, I> {
     }
 
     fn retval(&self, idx: usize) -> Writable<Reg> {
-        Writable::from_reg(self.retval_regs[idx])
+        Writable::from_reg(self.retval_regs[idx].0)
     }
 
     fn get_vm_context(&self) -> Option<Reg> {

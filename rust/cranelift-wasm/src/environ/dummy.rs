@@ -743,11 +743,13 @@ impl<'data> ModuleEnvironment<'data> for DummyEnvironment {
         Ok(())
     }
 
-    fn declare_module_name(&mut self, name: &'data str) {
+    fn declare_module_name(&mut self, name: &'data str) -> WasmResult<()> {
         self.module_name = Some(String::from(name));
+        Ok(())
     }
 
-    fn declare_func_name(&mut self, func_index: FuncIndex, name: &'data str) {
+    fn declare_func_name(&mut self, func_index: FuncIndex, name: &'data str) -> WasmResult<()> {
         self.function_names[func_index] = String::from(name);
+        Ok(())
     }
 }

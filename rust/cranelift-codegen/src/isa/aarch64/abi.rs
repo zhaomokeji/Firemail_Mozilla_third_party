@@ -113,9 +113,9 @@ use log::{debug, trace};
 #[derive(Clone, Copy, Debug)]
 enum ABIArg {
     /// In a real register.
-    Reg(RealReg, ir::Type, ir::ArgumentExtension),
+    Reg(RealReg, ir::Type),
     /// Arguments only: on stack, at given offset from SP at entry.
-    Stack(i64, ir::Type, ir::ArgumentExtension),
+    Stack(i64, ir::Type),
 }
 
 /// AArch64 ABI information shared between body (callee) and caller.
@@ -187,7 +187,6 @@ fn try_fill_baldrdash_reg(call_conv: isa::CallConv, param: &ir::AbiParam) -> Opt
                 Some(ABIArg::Reg(
                     xreg(BALDRDASH_TLS_REG).to_real_reg(),
                     ir::types::I64,
-                    param.extension,
                 ))
             }
             &ir::ArgumentPurpose::SignatureId => {
@@ -195,7 +194,6 @@ fn try_fill_baldrdash_reg(call_conv: isa::CallConv, param: &ir::AbiParam) -> Opt
                 Some(ABIArg::Reg(
                     xreg(BALDRDASH_SIG_REG).to_real_reg(),
                     ir::types::I64,
-                    param.extension,
                 ))
             }
             _ => None,
@@ -281,11 +279,7 @@ fn compute_arg_locs(
             } else {
                 vreg(*next_reg)
             };
-            ret.push(ABIArg::Reg(
-                reg.to_real_reg(),
-                param.value_type,
-                param.extension,
-            ));
+            ret.push(ABIArg::Reg(reg.to_real_reg(), param.value_type));
             *next_reg += 1;
         } else {
             // Compute size. Every arg takes a minimum slot of 8 bytes. (16-byte
@@ -295,11 +289,7 @@ fn compute_arg_locs(
             // Align.
             debug_assert!(size.is_power_of_two());
             next_stack = (next_stack + size - 1) & !(size - 1);
-            ret.push(ABIArg::Stack(
-                next_stack as i64,
-                param.value_type,
-                param.extension,
-            ));
+            ret.push(ABIArg::Stack(next_stack as i64, param.value_type));
             next_stack += size;
         }
     }
@@ -311,17 +301,9 @@ fn compute_arg_locs(
     let extra_arg = if add_ret_area_ptr {
         debug_assert!(args_or_rets == ArgsOrRets::Args);
         if next_xreg < max_reg_vals {
-            ret.push(ABIArg::Reg(
-                xreg(next_xreg).to_real_reg(),
-                I64,
-                ir::ArgumentExtension::None,
-            ));
+            ret.push(ABIArg::Reg(xreg(next_xreg).to_real_reg(), I64));
         } else {
-            ret.push(ABIArg::Stack(
-                next_stack as i64,
-                I64,
-                ir::ArgumentExtension::None,
-            ));
+            ret.push(ABIArg::Stack(next_stack as i64, I64));
             next_stack += 8;
         }
         Some(ret.len() - 1)
@@ -509,7 +491,7 @@ fn get_special_purpose_param_register(
 ) -> Option<Reg> {
     let idx = f.signature.special_param_index(purpose)?;
     match abi.args[idx] {
-        ABIArg::Reg(reg, ..) => Some(reg.to_reg()),
+        ABIArg::Reg(reg, _) => Some(reg.to_reg()),
         ABIArg::Stack(..) => None,
     }
 }
@@ -884,7 +866,7 @@ impl ABIBody for AArch64ABIBody {
     fn liveins(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &arg in &self.sig.args {
-            if let ABIArg::Reg(r, ..) = arg {
+            if let ABIArg::Reg(r, _) = arg {
                 set.insert(r);
             }
         }
@@ -894,7 +876,7 @@ impl ABIBody for AArch64ABIBody {
     fn liveouts(&self) -> Set<RealReg> {
         let mut set: Set<RealReg> = Set::empty();
         for &ret in &self.sig.rets {
-            if let ABIArg::Reg(r, ..) = ret {
+            if let ABIArg::Reg(r, _) = ret {
                 set.insert(r);
             }
         }
@@ -915,10 +897,8 @@ impl ABIBody for AArch64ABIBody {
 
     fn gen_copy_arg_to_reg(&self, idx: usize, into_reg: Writable<Reg>) -> Inst {
         match &self.sig.args[idx] {
-            // Extension mode doesn't matter (we're copying out, not in; we
-            // ignore high bits by convention).
-            &ABIArg::Reg(r, ty, _) => Inst::gen_move(into_reg, r.to_reg(), ty),
-            &ABIArg::Stack(off, ty, _) => load_stack(
+            &ABIArg::Reg(r, ty) => Inst::gen_move(into_reg, r.to_reg(), ty),
+            &ABIArg::Stack(off, ty) => load_stack(
                 MemArg::FPOffset(self.fp_to_arg_offset() + off, ty),
                 into_reg,
                 ty,
@@ -941,10 +921,15 @@ impl ABIBody for AArch64ABIBody {
         }
     }
 
-    fn gen_copy_reg_to_retval(&self, idx: usize, from_reg: Writable<Reg>) -> Vec<Inst> {
+    fn gen_copy_reg_to_retval(
+        &self,
+        idx: usize,
+        from_reg: Writable<Reg>,
+        ext: ArgumentExtension,
+    ) -> Vec<Inst> {
         let mut ret = Vec::new();
         match &self.sig.rets[idx] {
-            &ABIArg::Reg(r, ty, ext) => {
+            &ABIArg::Reg(r, ty) => {
                 let from_bits = ty_bits(ty) as u8;
                 let dest_reg = Writable::from_reg(r.to_reg());
                 match (ext, from_bits) {
@@ -969,7 +954,7 @@ impl ABIBody for AArch64ABIBody {
                     _ => ret.push(Inst::gen_move(dest_reg, from_reg.to_reg(), ty)),
                 };
             }
-            &ABIArg::Stack(off, ty, ext) => {
+            &ABIArg::Stack(off, ty) => {
                 let from_bits = ty_bits(ty) as u8;
                 // Trash the from_reg; it should be its last use.
                 match (ext, from_bits) {
@@ -1379,7 +1364,7 @@ fn abisig_to_uses_and_defs(sig: &ABISig) -> (Vec<Reg>, Vec<Writable<Reg>>) {
     let mut uses = Vec::new();
     for arg in &sig.args {
         match arg {
-            &ABIArg::Reg(reg, ..) => uses.push(reg.to_reg()),
+            &ABIArg::Reg(reg, _) => uses.push(reg.to_reg()),
             _ => {}
         }
     }
@@ -1388,7 +1373,7 @@ fn abisig_to_uses_and_defs(sig: &ABISig) -> (Vec<Reg>, Vec<Writable<Reg>>) {
     let mut defs = get_caller_saves(sig.call_conv);
     for ret in &sig.rets {
         match ret {
-            &ABIArg::Reg(reg, ..) => defs.push(Writable::from_reg(reg.to_reg())),
+            &ABIArg::Reg(reg, _) => defs.push(Writable::from_reg(reg.to_reg())),
             _ => {}
         }
     }
@@ -1484,49 +1469,12 @@ impl ABICall for AArch64ABICall {
         from_reg: Reg,
     ) {
         match &self.sig.args[idx] {
-            &ABIArg::Reg(reg, ty, ext)
-                if ext != ir::ArgumentExtension::None && ty_bits(ty) < 64 =>
-            {
-                assert_eq!(RegClass::I64, reg.get_class());
-                let signed = match ext {
-                    ir::ArgumentExtension::Uext => false,
-                    ir::ArgumentExtension::Sext => true,
-                    _ => unreachable!(),
-                };
-                ctx.emit(Inst::Extend {
-                    rd: Writable::from_reg(reg.to_reg()),
-                    rn: from_reg,
-                    signed,
-                    from_bits: ty_bits(ty) as u8,
-                    to_bits: 64,
-                });
-            }
-            &ABIArg::Reg(reg, ty, _) => {
-                ctx.emit(Inst::gen_move(
-                    Writable::from_reg(reg.to_reg()),
-                    from_reg,
-                    ty,
-                ));
-            }
-            &ABIArg::Stack(off, ty, ext) => {
-                if ext != ir::ArgumentExtension::None && ty_bits(ty) < 64 {
-                    assert_eq!(RegClass::I64, from_reg.get_class());
-                    let signed = match ext {
-                        ir::ArgumentExtension::Uext => false,
-                        ir::ArgumentExtension::Sext => true,
-                        _ => unreachable!(),
-                    };
-                    // Extend in place in the source register. Our convention is to
-                    // treat high bits as undefined for values in registers, so this
-                    // is safe, even for an argument that is nominally read-only.
-                    ctx.emit(Inst::Extend {
-                        rd: Writable::from_reg(from_reg),
-                        rn: from_reg,
-                        signed,
-                        from_bits: ty_bits(ty) as u8,
-                        to_bits: 64,
-                    });
-                }
+            &ABIArg::Reg(reg, ty) => ctx.emit(Inst::gen_move(
+                Writable::from_reg(reg.to_reg()),
+                from_reg,
+                ty,
+            )),
+            &ABIArg::Stack(off, ty) => {
                 ctx.emit(store_stack(MemArg::SPOffset(off, ty), from_reg, ty))
             }
         }
@@ -1539,10 +1487,8 @@ impl ABICall for AArch64ABICall {
         into_reg: Writable<Reg>,
     ) {
         match &self.sig.rets[idx] {
-            // Extension mode doesn't matter because we're copying out, not in,
-            // and we ignore high bits in our own registers by convention.
-            &ABIArg::Reg(reg, ty, _) => ctx.emit(Inst::gen_move(into_reg, reg.to_reg(), ty)),
-            &ABIArg::Stack(off, ty, _) => {
+            &ABIArg::Reg(reg, ty) => ctx.emit(Inst::gen_move(into_reg, reg.to_reg(), ty)),
+            &ABIArg::Stack(off, ty) => {
                 let ret_area_base = self.sig.stack_arg_space;
                 ctx.emit(load_stack(
                     MemArg::SPOffset(off + ret_area_base, ty),
